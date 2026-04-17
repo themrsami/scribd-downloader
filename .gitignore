@@ -25,6 +25,7 @@ venv/
 ENV/
 env/
 .venv/
+.venv*/
 
 # IDE
 .idea/
@@ -38,3 +39,12 @@ Thumbs.db
 
 # PDF outputs (don't commit downloaded PDFs)
 *.pdf
+
+# Local runtime caches
+.selenium/
+.tmp-python/
+.chrome-inspect/
+.chrome-runtime-profile/
+.chrome-pdf-check/
+scribd-chrome-profile-*/
+

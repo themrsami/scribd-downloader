@@ -37,10 +37,14 @@
 ## Features
 
 - **One-click download** - Just paste the Scribd URL and get your PDF
+- **Supports both Scribd URL styles** - Works with `/document/...` and legacy `/doc/...` links
 - **Runs in background** - Headless Chrome, no browser window pops up
 - **Fast processing** - Optimized scrolling and minimal wait times
 - **Clean PDFs** - No cookie banners, toolbars, or watermarks
-- **Custom page size** - Executive size (7.25" x 10.5") with no margins
+- **Large file friendly** - Uses a longer ChromeDriver timeout and streamed PDF export for big image-based documents
+- **Better math rendering** - Waits for fonts and render stability before printing, and preserves Scribd layout classes needed by equations/SVG
+- **Better pagination** - Uses Scribd's real page wrappers to avoid extra trailing pages
+- **Dynamic page size** - Detects the rendered Scribd page size instead of forcing one fixed sheet size
 - **Auto filename** - PDF named after the document URL automatically
 - **No login required** - Works without Scribd account
 
@@ -81,6 +85,11 @@
    Input link Scribd: https://www.scribd.com/document/123456789/Document-Title
    ```
 
+   Legacy Scribd URLs also work:
+   ```
+   Input link Scribd: https://www.scribd.com/doc/123456789/Document-Title
+   ```
+
 3. **Wait for the download** - The script will:
    - Open the document in headless Chrome
    - Scroll through all pages to load content
@@ -93,32 +102,34 @@
 
 ## Example Output
 
-```
+```text
 $ python scribd-downloader.py
-Input link Scribd: https://www.scribd.com/document/863374232/Ultimate-Web-Development-Bundle
+Input link Scribd: https://www.scribd.com/document/903361807/WorkdaySimpleIntegrations-EIB-31v2
 
-Link embed: https://www.scribd.com/embeds/863374232/content
-Output filename: Ultimate-Web-Development-Bundle.pdf
+Link embed: https://www.scribd.com/embeds/903361807/content
+Output filename: WorkdaySimpleIntegrations-EIB-31v2.pdf
 
-🚀 Starting headless Chrome browser...
-✅ Cookie dialogs hidden
-📄 Found 45 pages, scrolling...
-   Scrolled 10/45 pages...
-   Scrolled 20/45 pages...
-   Scrolled 30/45 pages...
-   Scrolled 40/45 pages...
-✅ All 45 pages loaded
-✅ Top toolbar removed
-✅ Bottom toolbar removed
-✅ Cleaned 1 scroll containers
-✅ Print CSS injected
+Starting Chrome browser...
+Cookie dialogs hidden.
+Found 316 pages, scrolling...
+  Scrolled 10/316 pages...
+  Scrolled 20/316 pages...
+  ...
+  Detected 617 pages after lazy loading, continuing...
+All 617 pages loaded.
+Top toolbar removed.
+Bottom toolbar removed.
+Adjusted 1 scroll containers for print.
+Print CSS injected.
+Render settle reached its time budget; continuing with best effort.
 
-📥 Saving PDF as: Ultimate-Web-Development-Bundle.pdf
-   Page size: Executive (7.25" x 10.5")
-   Margins: None
-   Headers/Footers: Disabled
-✅ PDF saved successfully to: C:\Users\...\Ultimate-Web-Development-Bundle.pdf
-🔒 Browser closed
+Saving PDF as: WorkdaySimpleIntegrations-EIB-31v2.pdf
+  Page size: 10.44" x 13.50" (from .outer_page)
+  Margins: None
+  Headers/Footers: Disabled
+  ChromeDriver command timeout: 600s
+PDF saved successfully to: C:\Users\...\WorkdaySimpleIntegrations-EIB-31v2.pdf
+Browser closed.
 ```
 
 ---
@@ -127,7 +138,7 @@ Output filename: Ultimate-Web-Development-Bundle.pdf
 
 | Setting | Value |
 |---------|-------|
-| Page Size | Executive (7.25" x 10.5") |
+| Page Size | Detected dynamically from Scribd's rendered page |
 | Margins | None (0) |
 | Headers/Footers | Disabled |
 | Background Graphics | Enabled |
@@ -139,9 +150,10 @@ Output filename: Ultimate-Web-Development-Bundle.pdf
 1. **URL Conversion** - Converts Scribd document URL to embeddable format
 2. **Headless Browser** - Opens Chrome in background (invisible)
 3. **Page Loading** - Scrolls through all pages to trigger lazy-loading
-4. **Cleanup** - Removes toolbars, cookie banners, and overlays
-5. **PDF Generation** - Uses Chrome DevTools Protocol to generate PDF directly
-6. **Auto Close** - Browser closes automatically after saving
+4. **Cleanup** - Removes toolbars, cookie banners, and overlays while preserving Scribd layout classes
+5. **Render Stabilization** - Waits for fonts, images, and page layout to settle before printing
+6. **Dynamic PDF Generation** - Detects the rendered page size and uses Chrome DevTools Protocol to generate the PDF directly
+7. **Auto Close** - Browser closes automatically after saving
 
 ---
 
@@ -156,10 +168,34 @@ pip install --upgrade selenium
 ### PDF not saving
 - Ensure you have write permissions in the current directory
 - Check if the Scribd URL is valid and accessible
+- For very large documents, increase `SCRIBD_CDP_TIMEOUT` (default: `600`)
+
+### Page counter looks too high while scrolling
+- Scribd creates extra internal page elements while lazy-loading
+- The scrolling progress is only a loading indicator and can be higher than the final PDF page count
 
 ### Blank pages in PDF
 - Some documents may have DRM protection
-- Try increasing the scroll delay in the script if pages aren't loading
+- Try increasing `SCRIBD_SCROLL_DELAY` if pages are not loading completely
+- If a document still renders incorrectly, try visible mode with `SCRIBD_HEADLESS=0`
+
+### Large, image-heavy, or math-heavy documents
+You can tune the export with environment variables:
+
+```powershell
+$env:SCRIBD_CDP_TIMEOUT="900"
+$env:SCRIBD_RENDER_SETTLE_TIMEOUT="45"
+$env:SCRIBD_SCROLL_DELAY="0.2"
+python scribd-downloader.py
+```
+
+Useful variables:
+
+- `SCRIBD_CDP_TIMEOUT` - ChromeDriver command timeout in seconds for `Page.printToPDF`
+- `SCRIBD_RENDER_SETTLE_TIMEOUT` - Maximum time to wait for fonts/images/layout to settle before exporting
+- `SCRIBD_SCROLL_DELAY` - Delay between page scrolls when forcing lazy-loaded pages to render
+- `SCRIBD_PDF_STREAM_CHUNK_SIZE` - Chunk size used when reading a streamed PDF response from Chrome
+- `SCRIBD_HEADLESS=0` - Run with a visible browser when debugging rendering issues locally
 
 ---
 
