@@ -83,16 +83,26 @@ def convert_scribd_link(url):
         url: Standard Scribd URL such as
             https://www.scribd.com/document/123456789/Document-Title
             or https://www.scribd.com/doc/123456789/Document-Title
+            or https://es.scribd.com/document/123456789/Document-Title
+            optionally with a "?secret_password=..." query string for
+            privately shared documents.
 
     Returns:
         The embeddable content URL, or "Invalid Scribd URL" if no document id
         can be extracted.
     """
-    match = re.search(r"https://www\.scribd\.com/(?:document|doc)/(\d+)/", url)
+    match = re.search(r"https://[\w.-]*scribd\.com/(?:document|doc)/(\d+)/", url)
     if not match:
         return "Invalid Scribd URL"
 
-    return f"https://www.scribd.com/embeds/{match.group(1)}/content"
+    embed_url = f"https://www.scribd.com/embeds/{match.group(1)}/content"
+
+    query = urlparse(url).query
+    secret_password_match = re.search(r"secret_password=([^&]+)", query)
+    if secret_password_match:
+        embed_url += f"?secret_password={secret_password_match.group(1)}"
+
+    return embed_url
 
 
 def get_filename_from_url(url):
