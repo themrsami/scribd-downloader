@@ -92,6 +92,13 @@
    Input link Scribd: https://www.scribd.com/doc/123456789/Document-Title
    ```
 
+   **Bulk download:** paste as many links as you like (one per line or space-separated) and press Enter once; downloading starts a second later. Documents download in parallel, each in its own browser. You can also pass links as arguments or pipe a file:
+   ```bash
+   python scribd-downloader.py URL1 URL2 URL3
+   python scribd-downloader.py < links.txt
+   ```
+   Duplicate links are downloaded once, clashing filenames get the document id appended, and one failed document doesn't stop the others. A summary is printed at the end. Set `SCRIBD_PARALLEL` to change how many documents download at once (default: `3`).
+
 3. **Wait for the download** - The script will:
    - Open the document in headless Chrome
    - Load document pages directly in bounded batches
@@ -213,6 +220,7 @@ Useful variables:
 - `SCRIBD_CDP_TIMEOUT` - ChromeDriver command timeout in seconds for `Page.printToPDF`
 - `SCRIBD_PAGE_LOAD_TIMEOUT` - Maximum direct page-loading time in seconds (default: `120`)
 - `SCRIBD_EXPORT_BATCH_SIZE` - Maximum fully loaded pages kept in Chrome at once (default: `8`)
+- `SCRIBD_PARALLEL` - Documents downloaded at once in bulk mode (default: `3`); each uses its own Chrome, so lower it if RAM is tight
 - `SCRIBD_HEADLESS=0` - Run with a visible browser when debugging rendering issues locally
 
 ---
