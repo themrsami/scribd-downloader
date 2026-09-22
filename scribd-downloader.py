@@ -15,10 +15,16 @@ Key behaviors:
 """
 
 import base64
+import builtins
 import os
+import queue
 import re
+import stat
+import sys
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 from urllib.parse import unquote, urlparse
 
@@ -52,6 +58,28 @@ HEADLESS_ENABLED = os.getenv("SCRIBD_HEADLESS", "1").strip().lower() not in {
 }
 DEFAULT_PAPER_WIDTH_INCHES = 7.25
 DEFAULT_PAPER_HEIGHT_INCHES = 10.5
+# Each document gets its own Chrome (~1.5-2.5 GB peak), so keep this modest.
+DEFAULT_PARALLEL_DOWNLOADS = max(1, int(os.getenv("SCRIBD_PARALLEL", "3")))
+SCRIBD_URL_RE = re.compile(
+    r"https?://(?:www\.)?scribd\.com/(?:document|doc)/(\d+)", re.IGNORECASE
+)
+
+PASTE_IDLE_SECONDS = 1.0
+
+_log_lock = threading.Lock()
+_log_context = threading.local()
+_driver_start_lock = threading.Lock()
+
+
+def print(*args, **kwargs):
+    """Thread-safe print that prefixes lines with the current document tag."""
+    tag = getattr(_log_context, "tag", None)
+    with _log_lock:
+        kwargs.setdefault("flush", True)  # IDE/mintty consoles buffer stdout
+        if tag:
+            builtins.print(f"[{tag}]", *args, **kwargs)
+        else:
+            builtins.print(*args, **kwargs)
 
 
 def build_chrome_options(runtime_profile_dir):
@@ -88,7 +116,7 @@ def convert_scribd_link(url):
         The embeddable content URL, or "Invalid Scribd URL" if no document id
         can be extracted.
     """
-    match = re.search(r"https://www\.scribd\.com/(?:document|doc)/(\d+)/", url)
+    match = SCRIBD_URL_RE.search(url)
     if not match:
         return "Invalid Scribd URL"
 
@@ -97,7 +125,7 @@ def convert_scribd_link(url):
 
 def get_filename_from_url(url):
     """
-    Build an output filename from the last URL path segment.
+    Build a filesystem-safe output filename from the last URL path segment.
 
     Args:
         url: Scribd document URL.
@@ -107,8 +135,41 @@ def get_filename_from_url(url):
     """
     parsed = urlparse(url)
     path = parsed.path.rstrip("/")
-    last_segment = path.split("/")[-1] if path else "scribd_document"
-    return f"{unquote(last_segment)}.pdf"
+    last_segment = path.split("/")[-1] if path else ""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", unquote(last_segment))
+    name = name.strip(" .") or "scribd_document"
+    return f"{name[:150]}.pdf"
+
+
+def plan_downloads(urls):
+    """
+    Turn raw URLs into (doc_id, url, filename) jobs.
+
+    Duplicate documents are downloaded once, and documents whose names collide
+    get their id appended so no download overwrites another in the same batch.
+    Returns (jobs, invalid_urls).
+    """
+    jobs, invalid = [], []
+    seen_ids, used_names = set(), set()
+
+    for url in urls:
+        match = SCRIBD_URL_RE.search(url)
+        if not match:
+            invalid.append(url)
+            continue
+
+        doc_id = match.group(1)
+        if doc_id in seen_ids:
+            continue
+        seen_ids.add(doc_id)
+
+        filename = get_filename_from_url(url)
+        if filename.lower() in used_names:
+            filename = f"{filename[:-4]}-{doc_id}.pdf"
+        used_names.add(filename.lower())
+        jobs.append((doc_id, url, filename))
+
+    return jobs, invalid
 
 
 def configure_command_timeout(driver, timeout_seconds):
@@ -1225,42 +1286,28 @@ def save_pdf_pages_individually(
             "disk-spooled PDF pages..."
         )
         writer = PdfWriter()
+        partial_path = f"{filename}.part"
         try:
             for page_path in page_files:
                 writer.append(page_path)
-            with open(filename, "wb") as output_handle:
+            with open(partial_path, "wb") as output_handle:
                 writer.write(output_handle)
+            os.replace(partial_path, filename)
         finally:
             writer.close()
+            if os.path.exists(partial_path):
+                os.remove(partial_path)
 
     finally:
         spool.cleanup()
 
     return os.path.abspath(filename)
 
-def main():
-    """Run the exporter interactively."""
-    input_url = input("Input link Scribd: ").strip()
-
-    converted_url = convert_scribd_link(input_url)
-    pdf_filename = get_filename_from_url(input_url)
-
+def download_document(url, pdf_filename):
+    """Export one Scribd document to pdf_filename in its own Chrome instance."""
+    converted_url = convert_scribd_link(url)
     print(f"Link embed: {converted_url}")
     print(f"Output filename: {pdf_filename}")
-
-    if converted_url == "Invalid Scribd URL":
-        print("Error: Please provide a valid Scribd document URL")
-        print(
-            "Example: "
-            "https://www.scribd.com/document/"
-            "123456789/Document-Title"
-        )
-        print(
-            "Example: "
-            "https://www.scribd.com/doc/"
-            "123456789/Document-Title"
-        )
-        raise SystemExit(1)
 
     with tempfile.TemporaryDirectory(
         prefix="scribd-chrome-profile-"
@@ -1268,15 +1315,13 @@ def main():
         driver = None
 
         try:
-            print("\nStarting Chrome browser...")
+            print("Starting Chrome browser...")
 
-            options = build_chrome_options(
-                runtime_profile_dir
-            )
+            options = build_chrome_options(runtime_profile_dir)
 
-            driver = webdriver.Chrome(
-                options=options
-            )
+            # Selenium Manager may download ChromeDriver on first use; don't race it.
+            with _driver_start_lock:
+                driver = webdriver.Chrome(options=options)
 
             driver.get(converted_url)
             time.sleep(1)
@@ -1300,56 +1345,24 @@ def main():
 
             inject_print_styles(driver)
 
-            print(
-                f"\nSaving PDF as: {pdf_filename}"
-            )
-
-            print(
-                "  Export mode: "
-                "Individual document pages"
-            )
-
+            print(f"Saving PDF as: {pdf_filename}")
+            print("  Export mode: Individual document pages")
             print("  Margins: None")
-
-            print(
-                "  Headers/Footers: Disabled"
-            )
-
+            print("  Headers/Footers: Disabled")
             print(
                 "  ChromeDriver command timeout: "
                 f"{DEFAULT_CDP_TIMEOUT_SECONDS}s"
             )
 
-            driver.execute_script(
-                "window.scrollTo(0, 0)"
-            )
+            driver.execute_script("window.scrollTo(0, 0)")
 
-            saved_path = (
-                save_pdf_pages_individually(
-                    driver,
-                    pdf_filename,
-                )
-            )
+            saved_path = save_pdf_pages_individually(driver, pdf_filename)
 
             if not saved_path:
-                raise RuntimeError(
-                    "PDF export failed."
-                )
+                raise RuntimeError("PDF export failed.")
 
-            print(
-                "PDF saved successfully to: "
-                f"{saved_path}"
-            )
-
-        except (
-            RuntimeError,
-            WebDriverException,
-        ) as error:
-            print(
-                f"Export failed: {error}"
-            )
-
-            raise SystemExit(1)
+            print(f"PDF saved successfully to: {saved_path}")
+            return saved_path
 
         finally:
             if driver is not None:
@@ -1357,6 +1370,94 @@ def main():
                 print("Browser closed.")
 
 
+def read_urls():
+    """Collect Scribd URLs from command-line args, piped stdin, or pasted text."""
+    if len(sys.argv) > 1:
+        text = " ".join(sys.argv[1:])
+    else:
+        # isatty() is False in IDE consoles and Git Bash, so only a redirected
+        # file (`< links.txt`) is read to EOF; everything else is interactive.
+        interactive = not stat.S_ISREG(os.fstat(sys.stdin.fileno()).st_mode)
+        if not interactive:
+            return re.findall(r"https?://\S+", sys.stdin.read())
+
+        print(
+            "Paste Scribd link(s), one per line or space-separated, "
+            "then press Enter:"
+        )
+
+        # A multi-line paste arrives as a burst of lines, so start once input
+        # goes quiet after a link instead of requiring an extra empty line.
+        incoming = queue.Queue()
+
+        def pump():
+            try:
+                while True:
+                    incoming.put(input())
+            except EOFError:
+                incoming.put(None)
+
+        threading.Thread(target=pump, daemon=True).start()
+
+        lines = []
+        while True:
+            try:
+                line = incoming.get(timeout=PASTE_IDLE_SECONDS if lines else None)
+            except queue.Empty:
+                break
+            if line is None:
+                break
+            if "http" in line:
+                lines.append(line)
+        text = "\n".join(lines)
+
+    return re.findall(r"https?://\S+", text)
+
+
+def run_job(job):
+    """Thread entry point: tag log output and download one document."""
+    doc_id, url, filename = job
+    _log_context.tag = doc_id
+    try:
+        return download_document(url, filename)
+    finally:
+        _log_context.tag = None
+
+
+def main():
+    """Download every pasted Scribd link, several documents at a time."""
+    jobs, invalid = plan_downloads(read_urls())
+
+    for url in invalid:
+        print(f"Skipping invalid Scribd URL: {url}")
+
+    if not jobs:
+        print("Error: Please provide at least one valid Scribd document URL")
+        print("Example: https://www.scribd.com/document/123456789/Document-Title")
+        print("Example: https://www.scribd.com/doc/123456789/Document-Title")
+        raise SystemExit(1)
+
+    workers = min(DEFAULT_PARALLEL_DOWNLOADS, len(jobs))
+    print(f"\nDownloading {len(jobs)} document(s), {workers} at a time...\n")
+
+    failures = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(run_job, job): job for job in jobs}
+        for future in as_completed(futures):
+            doc_id, url, filename = futures[future]
+            try:
+                future.result()
+            except Exception as error:  # one bad document must not stop the rest
+                failures.append((url, error))
+                print(f"[{doc_id}] Export failed: {error}")
+
+    print(f"\nDone: {len(jobs) - len(failures)}/{len(jobs)} document(s) saved.")
+    for url, error in failures:
+        print(f"  FAILED {url}: {error}")
+
+    if failures or invalid:
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
     main()
-    
