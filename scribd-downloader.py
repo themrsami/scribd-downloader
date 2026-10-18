@@ -44,6 +44,14 @@ DEFAULT_EXPORT_BATCH_SIZE = max(
     1,
     int(os.getenv("SCRIBD_EXPORT_BATCH_SIZE", "8")),
 )
+DEFAULT_PAGE_COUNT_TIMEOUT_SECONDS = max(
+    5,
+    int(os.getenv("SCRIBD_PAGE_COUNT_TIMEOUT", "60")),
+)
+DEFAULT_PAGE_COUNT_SETTLE_SECONDS = max(
+    0.5,
+    float(os.getenv("SCRIBD_PAGE_COUNT_SETTLE", "3")),
+)
 PDF_STREAM_CHUNK_SIZE = int(os.getenv("SCRIBD_PDF_STREAM_CHUNK_SIZE", str(1024 * 1024)))
 HEADLESS_ENABLED = os.getenv("SCRIBD_HEADLESS", "1").strip().lower() not in {
     "0",
@@ -220,6 +228,51 @@ def hide_cookie_dialogs(driver):
         });
         """
     )
+
+
+def wait_for_page_numbers(
+    driver,
+    timeout_seconds=DEFAULT_PAGE_COUNT_TIMEOUT_SECONDS,
+    settle_seconds=DEFAULT_PAGE_COUNT_SETTLE_SECONDS,
+):
+    """
+    Return every page number the Scribd viewer knows about, once that list
+    has stopped changing for `settle_seconds`.
+
+    window.docManager.pages is the source of truth for the document. Counting
+    .outer_page elements one second after load undercounts whenever the
+    viewer is still building the document, which silently truncates the PDF.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    last_numbers = None
+    last_change = time.monotonic()
+
+    while True:
+        numbers = driver.execute_script(
+            """
+            const manager = window.docManager;
+            if (!manager || !manager.pages) {
+                return [];
+            }
+            return Object.keys(manager.pages)
+                .filter((key) => manager.pages[key])
+                .map(Number)
+                .filter((num) => Number.isInteger(num) && num > 0)
+                .sort((a, b) => a - b);
+            """
+        )
+        now = time.monotonic()
+
+        if numbers != last_numbers:
+            last_numbers = numbers
+            last_change = now
+        elif numbers and now - last_change >= settle_seconds:
+            return numbers
+
+        if now >= deadline:
+            return last_numbers or []
+
+        time.sleep(0.25)
 
 
 def scroll_through_pages(driver, scroll_delay_seconds):
@@ -907,6 +960,7 @@ def release_page_batch(driver, page_numbers):
 def save_pdf_pages_individually(
     driver,
     filename,
+    page_numbers,
     timeout_seconds=DEFAULT_CDP_TIMEOUT_SECONDS,
 ):
     from pypdf import PdfReader, PdfWriter
@@ -916,17 +970,16 @@ def save_pdf_pages_individually(
         timeout_seconds,
     )
 
-    page_count = driver.execute_script(
-        """
-        return document.querySelectorAll(
-            '.outer_page'
-        ).length;
-        """
-    )
+    # Pages are addressed by their Scribd page number (#outer_page_N), never
+    # by their position in a live .outer_page list: release_page_batch() can
+    # take finished pages out of the DOM, which shifts every position after
+    # them and made the old loop print the wrong (unloaded) pages.
+    page_numbers = list(page_numbers)
+    page_count = len(page_numbers)
 
     if page_count <= 0:
         raise RuntimeError(
-            "No .outer_page elements found."
+            "No Scribd pages to export."
         )
 
     print(
@@ -947,9 +1000,9 @@ def save_pdf_pages_individually(
                     page_count,
                     index + DEFAULT_EXPORT_BATCH_SIZE,
                 )
-                batch_page_numbers = list(
-                    range(index + 1, batch_end + 1)
-                )
+                batch_page_numbers = page_numbers[
+                    index:batch_end
+                ]
                 print(
                     f"  Loading page batch "
                     f"{index + 1}-{batch_end}/{page_count}..."
@@ -959,9 +1012,11 @@ def save_pdf_pages_individually(
                     batch_page_numbers,
                 )
 
+            page_num = page_numbers[index]
+
             page_info = driver.execute_script(
                 """
-                const targetIndex = arguments[0];
+                const pageNum = arguments[0];
 
                 const pages = Array.from(
                     document.querySelectorAll(
@@ -969,7 +1024,9 @@ def save_pdf_pages_individually(
                     )
                 );
 
-                const target = pages[targetIndex];
+                const target = document.getElementById(
+                    `outer_page_${pageNum}`
+                );
 
                 if (!target) {
                     return null;
@@ -1023,6 +1080,31 @@ def save_pdf_pages_individually(
                     'true'
                 );
 
+                /*
+                 * Scribd centers pages inside a flex .document_scroller.
+                 * Once the target is position:absolute its wrappers
+                 * collapse to zero width and get centered, so the page
+                 * started at x = width / 2 and its right half was cut
+                 * off the sheet. Mark every wrapper so the print CSS can
+                 * flatten it and the page lands at the sheet's corner.
+                 */
+                document.querySelectorAll(
+                    '[data-export-ancestor]'
+                ).forEach((node) => {
+                    node.removeAttribute('data-export-ancestor');
+                });
+
+                for (
+                    let node = target.parentElement;
+                    node && node !== document.body;
+                    node = node.parentElement
+                ) {
+                    node.setAttribute(
+                        'data-export-ancestor',
+                        'true'
+                    );
+                }
+
                 const style = document.createElement(
                     'style'
                 );
@@ -1061,11 +1143,23 @@ def save_pdf_pages_individually(
                             display: none !important;
                         }
 
+                        [data-export-ancestor="true"] {
+                            position: static !important;
+                            display: block !important;
+                            transform: none !important;
+                            margin: 0 !important;
+                            padding: 0 !important;
+                            left: auto !important;
+                            top: auto !important;
+                        }
+
                         .outer_page[
                             data-export-target="true"
                         ] {
                             display: block !important;
                             visibility: visible !important;
+
+                            box-sizing: border-box !important;
 
                             position: absolute !important;
 
@@ -1113,26 +1207,25 @@ def save_pdf_pages_individually(
                     height
                 };
                 """,
-                index,
+                page_num,
             )
 
+            # Fail loudly instead of silently skipping: a skipped page is
+            # exactly how the PDF ended up incomplete without any error.
             if not page_info:
-                print(
-                    f"  Skipping page "
-                    f"{index + 1}: element missing"
+                raise RuntimeError(
+                    f"Scribd page {page_num} has no "
+                    f"#outer_page_{page_num} element."
                 )
-                continue
 
             width_px = int(page_info["width"])
             height_px = int(page_info["height"])
 
             if width_px <= 0 or height_px <= 0:
-                print(
-                    f"  Skipping page {index + 1}: "
-                    f"invalid geometry "
-                    f"{width_px}x{height_px}"
+                raise RuntimeError(
+                    f"Scribd page {page_num} has invalid "
+                    f"geometry {width_px}x{height_px}."
                 )
-                continue
 
             width_inches = width_px / 96.0
             height_inches = height_px / 96.0
@@ -1151,6 +1244,33 @@ def save_pdf_pages_individually(
                     "media": "print",
                 },
             )
+
+            # Check where the page actually lands in print layout. A page
+            # that does not start at the sheet's corner, or does not fill
+            # it, would come out cropped.
+            placed = driver.execute_script(
+                """
+                const rect = document.getElementById(
+                    `outer_page_${arguments[0]}`
+                ).getBoundingClientRect();
+                return [rect.left, rect.top, rect.width, rect.height];
+                """,
+                page_num,
+            )
+            left, top, placed_w, placed_h = placed
+            if (
+                abs(left) > 1
+                or abs(top) > 1
+                or abs(placed_w - width_px) > 1
+                or abs(placed_h - height_px) > 1
+            ):
+                raise RuntimeError(
+                    f"Scribd page {page_num} would print at "
+                    f"({left:.0f}, {top:.0f}) with size "
+                    f"{placed_w:.0f}x{placed_h:.0f} on a "
+                    f"{width_px}x{height_px} sheet; refusing "
+                    "to write a cropped page."
+                )
 
             result = driver.execute_cdp_cmd(
                 "Page.printToPDF",
@@ -1214,10 +1334,11 @@ def save_pdf_pages_individually(
                     batch_page_numbers,
                 )
 
-        if not page_files:
+        if len(page_files) != page_count:
             raise RuntimeError(
-                "No valid document pages "
-                "were exported."
+                f"Exported {len(page_files)} of "
+                f"{page_count} pages; refusing to "
+                "write an incomplete PDF."
             )
 
         print(
@@ -1284,17 +1405,19 @@ def main():
             hide_cookie_dialogs(driver)
             print("Cookie dialogs hidden.")
 
-            total_pages = driver.execute_script(
-                """
-                return document.querySelectorAll('.outer_page').length;
-                """
-            )
+            page_numbers = wait_for_page_numbers(driver)
 
-            if total_pages == 0:
+            if not page_numbers:
                 raise RuntimeError(
                     "No printable document pages "
-                    "were detected."
+                    "were detected (window.docManager "
+                    "has no pages)."
                 )
+
+            print(
+                f"Scribd viewer reports "
+                f"{len(page_numbers)} pages."
+            )
 
             prepare_document_for_print(driver)
 
@@ -1328,6 +1451,7 @@ def main():
                 save_pdf_pages_individually(
                     driver,
                     pdf_filename,
+                    page_numbers,
                 )
             )
 

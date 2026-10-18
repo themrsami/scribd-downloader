@@ -213,6 +213,8 @@ Useful variables:
 - `SCRIBD_CDP_TIMEOUT` - ChromeDriver command timeout in seconds for `Page.printToPDF`
 - `SCRIBD_PAGE_LOAD_TIMEOUT` - Maximum direct page-loading time in seconds (default: `120`)
 - `SCRIBD_EXPORT_BATCH_SIZE` - Maximum fully loaded pages kept in Chrome at once (default: `8`)
+- `SCRIBD_PAGE_COUNT_SETTLE` - Seconds the viewer's page list must stay unchanged before export starts (default: `3`)
+- `SCRIBD_PAGE_COUNT_TIMEOUT` - Maximum seconds to wait for the viewer's page list (default: `60`)
 - `SCRIBD_HEADLESS=0` - Run with a visible browser when debugging rendering issues locally
 
 ---
