@@ -17,8 +17,10 @@ Key behaviors:
 import base64
 import os
 import re
+import argparse
 import tempfile
 import time
+
 from io import BytesIO
 from urllib.parse import unquote, urlparse
 
@@ -1239,8 +1241,18 @@ def save_pdf_pages_individually(
     return os.path.abspath(filename)
 
 def main():
-    """Run the exporter interactively."""
-    input_url = input("Input link Scribd: ").strip()
+    """Run the exporter."""
+    parser = argparse.ArgumentParser(description="Scribd Document Downloader")
+    parser.add_argument("url", nargs="?", help="The Scribd document URL to download")
+    args = parser.parse_args()
+
+    input_url = args.url
+    if not input_url:
+        input_url = input("Input link Scribd: ").strip()
+
+    if not input_url:
+        print("Error: No Scribd URL provided.")
+        raise SystemExit(1)
 
     converted_url = convert_scribd_link(input_url)
     pdf_filename = get_filename_from_url(input_url)
