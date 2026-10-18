@@ -77,6 +77,12 @@
 
 ## Usage
 
+### Option 1: With command-line argument
+```bash
+python scribd-downloader.py https://www.scribd.com/document/123456789/Document-Title
+```
+
+### Option 2: Interactive mode
 1. **Run the script**
    ```bash
    python scribd-downloader.py
