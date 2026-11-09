@@ -52,7 +52,7 @@
 - **Auto filename** - Files named after the document URL automatically (safe on Windows, macOS and Linux)
 - **Clear errors** - If Scribd shows no pages, the script says why (bot check, blocked IP, deleted document, wrong password) and saves a screenshot
 - **No login required** - Works without Scribd account
-- **Tested** - 119 offline unit tests plus a live end-to-end test (see [Testing](#testing))
+- **Tested** - 121 offline unit tests plus a live end-to-end test (see [Testing](#testing))
 
 ---
 
@@ -319,7 +319,7 @@ Useful variables:
 
 The project has two kinds of tests:
 
-- **Unit tests** (119) run offline in under a second. No Chrome, no internet: Selenium, the network and image downloads are replaced by small fakes.
+- **Unit tests** (121) run offline in under a second. No Chrome, no internet: Selenium, the network and image downloads are replaced by small fakes.
 - **End-to-end test** (1) downloads real documents from scribd.com in every format. It needs Chrome and internet, so it is skipped unless you turn it on.
 
 ### Run the tests
@@ -355,11 +355,11 @@ Run on Windows 11, Python 3.14, Chrome 156, Selenium 4.51:
 
 | Check | Result |
 |-------|--------|
-| Unit tests | **119 passed** in 0.8 s |
+| Unit tests | **121 passed** in 1.1 s |
 | End-to-end test | **1 passed** in 13 s (2 documents, PDF + TXT + DOCX) |
 | DOCX page count in Microsoft Word | **Same as Scribd**: 2 → 2, 8 → 8, 307 → 307 |
 | PDF regression vs. previous version | **Identical**: same page count, page sizes and text on every page (8-page and 2-page documents) |
-| Large document, `--format all` | **307 pages in 2 min 40 s**: 307-page PDF (24 MB), TXT with 307 page markers (43,000 words), DOCX (4 MB) that opens in Word as exactly 307 pages, no failed images |
+| Large document, `--format all` | **307 pages in about 2.5 min**: 307-page PDF (24 MB), TXT with 307 page markers (43,000 words), DOCX (4 MB) that opens in Word as exactly 307 pages, no failed images |
 | Missing document | Exit code `1`, reason "The document was not found", debug screenshot and HTML saved |
 
 ---

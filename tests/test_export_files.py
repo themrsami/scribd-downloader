@@ -67,7 +67,7 @@ def test_write_docx_file_keeps_text_styles_layout_and_images(sd, tmp_path):
 
     def fake_fetch(src):
         fetched.append(src)
-        return make_png()
+        return make_png(40, 20)
 
     target = tmp_path / "doc.docx"
     sd.write_docx_file(sample_pages(), str(target), image_fetcher=fake_fetch)
@@ -107,14 +107,53 @@ def test_write_docx_file_keeps_text_styles_layout_and_images(sd, tmp_path):
     assert document.sections[0].page_width == pytest.approx(Pt(960 * 0.75), abs=Pt(1))
     assert document.sections[1].page_width > document.sections[1].page_height
 
-    # Image embedded once, cropped to the visible sprite area.
+    # Image downloaded once and cropped to the visible sprite area
+    # (40x20 sprite, cut 25% top/bottom and 50% right -> 20x10).
     assert fetched == ["https://example.test/sprite.png"]
     assert len(document.inline_shapes) == 1
-    src_rect = document.element.body.find(".//" + qn("a:srcRect"))
-    assert src_rect.get("t") == "25000"
-    assert src_rect.get("r") == "50000"
-    assert src_rect.get("b") == "25000"
-    assert src_rect.get("l") is None
+    blip = document.element.body.find(".//" + qn("a:blip"))
+    image = document.part.related_parts[blip.get(qn("r:embed"))].image
+    assert (image.px_width, image.px_height) == (20, 10)
+    assert document.element.body.find(".//" + qn("a:srcRect")) is None
+
+
+def test_crop_image_data_cuts_pixels(sd):
+    from io import BytesIO
+
+    from PIL import Image
+
+    # A 1px rule cut from the middle of a JPEG sprite: Word would not draw
+    # this if it had to crop it itself.
+    sprite = BytesIO()
+    Image.new("RGB", (700, 6), (0, 90, 170)).save(sprite, format="JPEG")
+    data, remaining = sd.crop_image_data(
+        sprite.getvalue(), {"left": 0.0, "top": 1 / 6, "right": 0.0, "bottom": 4 / 6}
+    )
+    assert remaining is None
+    cropped = Image.open(BytesIO(data))
+    assert cropped.format == "JPEG"
+    assert cropped.size == (700, 1)
+
+    png = make_png(40, 20)
+    data, remaining = sd.crop_image_data(png, {"left": 0.5})
+    assert Image.open(BytesIO(data)).size == (20, 20) and remaining is None
+    assert sd.crop_image_data(png, None) == (png, None)
+    assert sd.crop_image_data(png, {"top": 0}) == (png, None)
+
+
+def test_crop_falls_back_to_word_crop_without_pillow(sd, monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_pillow(name, *args, **kwargs):
+        if name == "PIL" or name.startswith("PIL."):
+            raise ImportError("no Pillow")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_pillow)
+    crop = {"top": 0.25}
+    assert sd.crop_image_data(make_png(), crop) == (make_png(), crop)
 
 
 def test_docx_survives_image_download_failures(sd, tmp_path, capsys):

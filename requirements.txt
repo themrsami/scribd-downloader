@@ -6,3 +6,4 @@ typing_extensions~=4.9
 websocket-client~=1.8
 pypdf>=6.0
 python-docx>=1.1
+Pillow>=10

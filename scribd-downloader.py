@@ -1971,6 +1971,44 @@ def apply_picture_crop(picture, crop):
             src_rect.set(attribute, str(values[side]))
 
 
+def crop_image_data(data, crop):
+    """
+    Cut an image down to the part Scribd shows (sprites are clipped with CSS).
+
+    Word cannot reliably crop pictures itself: a JPEG cropped on both top and
+    bottom to a sliver (e.g. a 1px rule from a sprite) is silently not drawn.
+    So the pixels are cropped here with Pillow when it is installed.
+
+    Returns:
+        (image bytes, crop still to apply in Word or None)
+    """
+    if not crop or not any(float(crop.get(side) or 0) > 0 for side in ("left", "top", "right", "bottom")):
+        return data, None
+    try:
+        from PIL import Image
+    except ImportError:
+        return data, crop
+
+    try:
+        image = Image.open(BytesIO(data))
+        width, height = image.size
+        left = int(round(float(crop.get("left") or 0) * width))
+        top = int(round(float(crop.get("top") or 0) * height))
+        right = width - int(round(float(crop.get("right") or 0) * width))
+        bottom = height - int(round(float(crop.get("bottom") or 0) * height))
+        right = max(right, min(width, left + 1))
+        bottom = max(bottom, min(height, top + 1))
+        cropped = image.crop((left, top, right, bottom))
+        output = BytesIO()
+        if image.format == "JPEG" and cropped.mode in ("RGB", "L", "CMYK"):
+            cropped.save(output, format="JPEG", quality=95)
+        else:
+            cropped.save(output, format="PNG")
+        return output.getvalue(), None
+    except Exception:  # unreadable image: let Word try with a srcRect crop
+        return data, crop
+
+
 PX_TO_EMU = 9525  # 1 CSS px = 1/96 inch = 9525 EMU
 PARAGRAPH_OFFSET_INCLUDES_SPACE = 1
 
@@ -2148,11 +2186,12 @@ def write_docx_file(pages, filename, image_fetcher=fetch_image_bytes):
         indent = clamp(block["x"] - area["left"], 0.0, area["content_width"] * 0.8)
         if indent + width <= area["content_width"]:
             paragraph_format.left_indent = px(indent)
+        data, crop = crop_image_data(data, block.get("crop"))
         try:
             picture = paragraph.add_run().add_picture(
                 BytesIO(data), width=px(width), height=px(height)
             )
-            apply_picture_crop(picture, block.get("crop"))
+            apply_picture_crop(picture, crop)
         except Exception:  # unsupported image format
             failed["images"] += 1
             paragraph._element.getparent().remove(paragraph._element)
@@ -2373,11 +2412,12 @@ def write_docx_file(pages, filename, image_fetcher=fetch_image_bytes):
                 below_text = block["y"] - anchor["y_end"]
                 if 0 <= below_text <= 0.6 * anchor["size"]:
                     offset += 0.15 * anchor["size"]
+            data, crop = crop_image_data(data, block.get("crop"))
             try:
                 picture = paragraph.add_run().add_picture(
                     BytesIO(data), width=px(block["w"]), height=px(block["h"])
                 )
-                apply_picture_crop(picture, block.get("crop"))
+                apply_picture_crop(picture, crop)
                 z_order += 1
                 float_picture_behind_text(
                     picture, block["x"], offset, z_order, vertical_from="paragraph"
