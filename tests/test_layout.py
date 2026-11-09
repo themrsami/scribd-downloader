@@ -132,6 +132,54 @@ def test_centered_paragraph_detected(sd):
     assert paragraph["centered"] is False
 
 
+def test_full_width_lines_and_list_items_are_not_centered(sd):
+    # Indented, nearly full-width wrapped list item (centre close to page centre).
+    lines = sd.build_lines(
+        [
+            run("3. Customizable Fonts and Colors: personalize your resume by", 160, 100, w=640),
+            run("fonts and colors, allowing you to match your style.", 183, 124, w=580),
+        ]
+    )
+    (paragraph,) = sd.build_paragraphs(lines, page_width=1000)
+    assert paragraph["centered"] is False
+
+    lines = sd.build_lines([run("A body line spanning most of the page width here", 150, 100, w=720)])
+    (paragraph,) = sd.build_paragraphs(lines, page_width=1000)
+    assert paragraph["centered"] is False
+
+
+def test_tiny_images_left_of_text_become_bullets(sd):
+    # Scribd draws these bullets as sprite images: one dot, and one narrow
+    # strip covering the next two items.
+    page = {
+        "pageNum": 1,
+        "width": 1000,
+        "runs": [
+            run("Concise: short and clear.", 170, 322, size=18, w=400),
+            run("Readable: easy to scan.", 170, 394, size=18, w=400),
+            run("Custom: easy to change.", 170, 466, size=18, w=400),
+            run("Plain paragraph far from the bullets.", 50, 600, size=18, w=600),
+        ],
+        "images": [
+            {"src": "dot.jpg", "x": 155, "y": 328, "w": 7.8, "h": 7.8},
+            {"src": "dot.jpg", "x": 155, "y": 400, "w": 7.8, "h": 78.7},
+            {"src": "photo.jpg", "x": 50, "y": 700, "w": 400, "h": 300},
+        ],
+    }
+    blocks = sd.layout_page(page)
+    texts_by_type = [
+        (block["type"], sd.paragraph_text(block) if block["type"] == "paragraph" else block["src"])
+        for block in blocks
+    ]
+    assert texts_by_type == [
+        ("paragraph", "• Concise: short and clear."),
+        ("paragraph", "• Readable: easy to scan."),
+        ("paragraph", "• Custom: easy to change."),
+        ("paragraph", "Plain paragraph far from the bullets."),
+        ("image", "photo.jpg"),
+    ]
+
+
 def test_styles_are_kept_per_segment(sd):
     (line,) = sd.build_lines(
         [

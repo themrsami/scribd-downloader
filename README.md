@@ -52,7 +52,7 @@
 - **Auto filename** - Files named after the document URL automatically (safe on Windows, macOS and Linux)
 - **Clear errors** - If Scribd shows no pages, the script says why (bot check, blocked IP, deleted document, wrong password) and saves a screenshot
 - **No login required** - Works without Scribd account
-- **Tested** - 97 offline unit tests plus a live end-to-end test (see [Testing](#testing))
+- **Tested** - 99 offline unit tests plus a live end-to-end test (see [Testing](#testing))
 
 ---
 
@@ -303,7 +303,7 @@ Useful variables:
 
 The project has two kinds of tests:
 
-- **Unit tests** (97) run offline in under a second. No Chrome, no internet: Selenium, the network and image downloads are replaced by small fakes.
+- **Unit tests** (99) run offline in under a second. No Chrome, no internet: Selenium, the network and image downloads are replaced by small fakes.
 - **End-to-end test** (1) downloads real documents from scribd.com in every format. It needs Chrome and internet, so it is skipped unless you turn it on.
 
 ### Run the tests
@@ -327,7 +327,7 @@ On Windows PowerShell, use `$env:SCRIBD_E2E="1"; python -m pytest -m e2e -v`. To
 | `tests/test_urls.py` | 36 | Accepts `www`, locale (`de.`/`es.`/`fr.`), no-`www`, no-scheme, `http`, uppercase, no-title, `/doc/` and `/embeds/` links. Rejects lookalike domains (`notscribd.com`, `evil-scribd.com`, `scribd.com.evil.com`) and non-document pages. Keeps and URL-encodes `secret_password`, redacts it in output. Safe filenames. |
 | `tests/test_cli.py` | 10 | Format parsing, default arguments match the old behaviour, links from arguments / files / stdin / prompt, duplicate removal, name clashes, bulk run continues after a failure with the right summary and exit code. |
 | `tests/test_diagnostics.py` | 13 | Waits until the page count is stable, survives script errors while loading, times out cleanly. Recognises Cloudflare checks, blocked access, missing documents (Scribd's real "Document Not Found" text), bad `secret_password`, private documents and login walls. Saves debug screenshot + HTML and never prints the password. |
-| `tests/test_layout.py` | 32 | Rebuilding text from positioned HTML: joining runs, spaces vs punctuation, non-breaking spaces, bullets drawn in tiny fonts, column gaps to tabs, wrapped lines, hyphenation, list items, bold lead-ins, headings, centring, styles, reading order of text and images, colour parsing. |
+| `tests/test_layout.py` | 34 | Rebuilding text from positioned HTML: joining runs, spaces vs punctuation, non-breaking spaces, bullets drawn in tiny fonts or as tiny sprite images, column gaps to tabs, wrapped lines, hyphenation, list items, bold lead-ins, headings, centring, styles, reading order of text and images, colour parsing. |
 | `tests/test_export_files.py` | 6 | TXT output exactly. DOCX keeps fonts, sizes, bold/italic, colours, centring, right-aligned tab stops, enlarged bullets, one section per page size (portrait/landscape), cropped sprite images. DOCX is still written when images fail to download or are invalid. |
 | `tests/test_e2e.py` | 1 | Bulk download of real documents from a links file with `--format all`: a `de.scribd.com` link (8 pages) and a no-`www`, no-scheme link (2 pages, columns and bullets). Checks PDF page count, one TXT page marker per PDF page, and real text in TXT and DOCX. |
 
@@ -337,7 +337,7 @@ Run on Windows 11, Python 3.14, Chrome 156, Selenium 4.51:
 
 | Check | Result |
 |-------|--------|
-| Unit tests | **97 passed** in 0.55 s |
+| Unit tests | **99 passed** in 0.6 s |
 | End-to-end test | **1 passed** in 12 s (2 documents, PDF + TXT + DOCX) |
 | PDF regression vs. previous version | **Identical**: same page count, page sizes and text on every page (8-page and 2-page documents) |
 | Large document, `--format all` | **307 pages in 3 min 41 s**: 307-page PDF (24 MB), TXT with 307 page markers (43,000 words), DOCX with 1,040 images (3.7 MB), no failed images |

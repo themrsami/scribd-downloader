@@ -1555,12 +1555,29 @@ def build_paragraphs(lines, page_width=0):
         tab_stops = [x for line in paragraph_lines for x in line.get("tab_stops", [])]
         centered = False
         if page_width > 0 and not tab_stops:
+            size = max(line["size"] for line in paragraph_lines)
             centered = all(
                 abs((line["x"] + line["x_end"]) / 2 - page_width / 2)
                 <= 0.04 * page_width
                 and line["x"] > 0.12 * page_width
                 for line in paragraph_lines
             )
+            if len(paragraph_lines) == 1:
+                # A full-width line is body text, not a centred heading.
+                line = paragraph_lines[0]
+                centered = centered and line["x_end"] - line["x"] < 0.7 * page_width
+            else:
+                # Wrapped centred text has ragged left edges; justified or
+                # left-aligned text shares one left edge.
+                lefts = [line["x"] for line in paragraph_lines]
+                centers = [(line["x"] + line["x_end"]) / 2 for line in paragraph_lines]
+                centered = (
+                    centered
+                    and max(lefts) - min(lefts) > 0.5 * size
+                    and max(centers) - min(centers) <= 0.03 * page_width
+                )
+            first_text = "".join(s["text"] for s in paragraph_lines[0]["segments"])
+            centered = centered and not starts_with_list_marker(first_text)
 
         result.append(
             {
@@ -1579,12 +1596,58 @@ def build_paragraphs(lines, page_width=0):
     return result
 
 
+def attach_image_bullets(paragraphs, images):
+    """
+    Turn tiny marker images into "•" bullets on the paragraphs they mark.
+
+    Scribd often draws list bullets as small images cut from a sprite: one
+    dot, or a narrow vertical strip holding the dots of several items. A
+    narrow image just left of a paragraph's first line becomes a bullet.
+
+    Returns:
+        The images that were not used as bullets.
+    """
+    sizes = sorted(paragraph["size"] for paragraph in paragraphs)
+    if not sizes:
+        return list(images)
+    body_size = sizes[len(sizes) // 2]
+
+    remaining = []
+    for image in images:
+        if not (0 < image["w"] <= 1.5 * body_size):
+            remaining.append(image)
+            continue
+
+        marked = [
+            paragraph
+            for paragraph in paragraphs
+            if 0 <= paragraph["x"] - (image["x"] + image["w"]) <= 4 * paragraph["size"]
+            and image["y"] - 0.8 * paragraph["size"]
+            <= paragraph["y"]
+            <= image["y"] + image["h"]
+            and not starts_with_list_marker(paragraph_text(paragraph))
+        ]
+        if not marked:
+            remaining.append(image)
+            continue
+
+        for paragraph in marked:
+            first_style = paragraph["segments"][0]["style"]
+            bullet_style = (first_style[0], first_style[1], first_style[2], False, False)
+            paragraph["segments"].insert(0, {"text": "• ", "style": bullet_style})
+            paragraph["x"] = image["x"]
+            paragraph["list"] = True
+
+    return remaining
+
+
 def layout_page(page):
     """Turn one extracted page into ordered blocks (paragraphs and images)."""
     width = float(page.get("width") or 0)
     paragraphs = build_paragraphs(build_lines(page.get("runs")), width)
+    images = attach_image_bullets(paragraphs, page.get("images") or [])
     blocks = [{"type": "paragraph", **paragraph} for paragraph in paragraphs]
-    blocks += [{"type": "image", **image} for image in page.get("images") or []]
+    blocks += [{"type": "image", **image} for image in images]
     blocks.sort(key=lambda block: (round(block["y"], 1), block["x"]))
     return blocks
 
