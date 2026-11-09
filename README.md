@@ -52,7 +52,7 @@
 - **Auto filename** - Files named after the document URL automatically (safe on Windows, macOS and Linux)
 - **Clear errors** - If Scribd shows no pages, the script says why (bot check, blocked IP, deleted document, wrong password) and saves a screenshot
 - **No login required** - Works without Scribd account
-- **Tested** - 99 offline unit tests plus a live end-to-end test (see [Testing](#testing))
+- **Tested** - 119 offline unit tests plus a live end-to-end test (see [Testing](#testing))
 
 ---
 
@@ -154,13 +154,29 @@ Bulk downloads run one document at a time (each Chrome instance can use 1.5-2.5 
 |--------|----------------|----------|
 | **PDF** | Chrome prints each Scribd page exactly as displayed | A faithful copy of the document |
 | **TXT** | Text read from Scribd's page HTML, rebuilt into lines and paragraphs, with `===== Page N =====` markers | Searching, copying, feeding into other tools |
-| **DOCX** | Same text, written to Word with the original fonts, sizes, colours, bold/italic, indents, right-aligned columns (tab stops), lists and cropped images; one Word page per Scribd page, same paper size | Editing the document |
+| **DOCX** | Same text, written to Word with the original fonts, sizes, colours, bold/italic, letter spacing, indents (including hanging indents for bullets), right-aligned columns (tab stops), lists and cropped images. One Word page per Scribd page, with the same paper size, margins, line heights and gaps, so the page count matches the original | Editing the document |
 
 Scribd renders every page as HTML: each piece of text is a positioned element carrying the uploaded document's font, size and colour, and figures are `<img>` tags (often one image reused as a sprite with a CSS clip). The TXT and DOCX exports read that HTML directly instead of converting the PDF, so the text is exact rather than OCR'd or guessed from a PDF.
 
+How the DOCX/TXT export handles tricky pages:
+
+| What Scribd does | What the export does |
+|------------------|----------------------|
+| Stacks text and image layers. Edited PDFs keep old text in a lower layer, hidden under an image patch | Hidden text is dropped, so it does not appear twice. Text under an opaque (JPEG) patch is always hidden; under a PNG it is dropped only when newer text in a higher layer replaces it. Full-page scans keep their OCR text. |
+| Draws fill-in blanks (`in ____.`) as 1px images | Turns them into `____` in the text line |
+| Draws bullets as tiny images, in a tiny symbol font, or as Private Use Area characters (`U+E000`) that normal fonts cannot show | Turns them into normal `•` bullets with hanging indents |
+| Puts text on top of boxes and shading, places icons beside text, builds diagrams from several images side by side, draws rules as 1px images | Floats those images at their original spot, anchored to the paragraph next to them so they move with their text, instead of stacking them between paragraphs |
+| Repeats a running title, copyright line and page number at the bottom of every page | Puts them in the real Word footer of each page, so they can never be pushed onto an extra page |
+| Draws table-of-contents dot leaders as rows of dots | Uses a right tab stop with a dot leader, like a real Word TOC |
+| Uses CSS `letter-spacing` for spaced-out headings | Copies it to Word character spacing (small kerning tweaks are ignored) |
+| Embeds the document's own fonts, which Word does not have | Measures each line in the browser with Word's substitute font and condenses the characters (Word "character scale") when the substitute is wider, so lines wrap where they did in the original |
+
+The result is checked by opening the DOCX in Microsoft Word. The 307-page test document gives **exactly 307 Word pages** (before these fixes: 324), and the test documents keep their page counts too (2 → 2, 8 → 8).
+
 Limitations:
 
-- Scribd's HTML positions each piece of text, it does not store paragraphs, so paragraphs and lists are rebuilt from spacing, indentation and fonts. Simple documents come out very close to the original; complex layouts (multi-column magazines, text over images, tables) may need touch-ups in Word.
+- Scribd's HTML positions each piece of text, it does not store paragraphs, so paragraphs and lists are rebuilt from spacing, indentation and fonts. Simple documents come out very close to the original; multi-column magazine layouts and tables may need touch-ups in Word.
+- Word draws text with the fonts installed on your computer. Character scaling keeps line widths close, but glyph shapes and heights still follow the substitute font, so very tight layouts can look slightly different.
 - Scanned documents that only contain page images have no text to extract. The DOCX will contain the page images; TXT will be mostly empty (no OCR is done).
 - Spreadsheet formulas and other source-file data are never sent to the browser by Scribd, so they cannot be recovered.
 - DOCX export downloads the page images; if an image cannot be downloaded, the DOCX is still written and a warning is printed.
@@ -303,7 +319,7 @@ Useful variables:
 
 The project has two kinds of tests:
 
-- **Unit tests** (99) run offline in under a second. No Chrome, no internet: Selenium, the network and image downloads are replaced by small fakes.
+- **Unit tests** (119) run offline in under a second. No Chrome, no internet: Selenium, the network and image downloads are replaced by small fakes.
 - **End-to-end test** (1) downloads real documents from scribd.com in every format. It needs Chrome and internet, so it is skipped unless you turn it on.
 
 ### Run the tests
@@ -329,6 +345,8 @@ On Windows PowerShell, use `$env:SCRIBD_E2E="1"; python -m pytest -m e2e -v`. To
 | `tests/test_diagnostics.py` | 13 | Waits until the page count is stable, survives script errors while loading, times out cleanly. Recognises Cloudflare checks, blocked access, missing documents (Scribd's real "Document Not Found" text), bad `secret_password`, private documents and login walls. Saves debug screenshot + HTML and never prints the password. |
 | `tests/test_layout.py` | 34 | Rebuilding text from positioned HTML: joining runs, spaces vs punctuation, non-breaking spaces, bullets drawn in tiny fonts or as tiny sprite images, column gaps to tabs, wrapped lines, hyphenation, list items, bold lead-ins, headings, centring, styles, reading order of text and images, colour parsing. |
 | `tests/test_export_files.py` | 6 | TXT output exactly. DOCX keeps fonts, sizes, bold/italic, colours, centring, right-aligned tab stops, enlarged bullets, one section per page size (portrait/landscape), cropped sprite images. DOCX is still written when images fail to download or are invalid. |
+| `tests/test_fidelity.py` | 9 | Hidden text under JPEG/PNG patches in edited PDFs (and kept for full-page scans and text inside boxes), fill-in blanks drawn as images, boxes placed behind text, letter spacing only for real spaced-out text. Word layout: one section per Scribd page, margins from the text area, exact line heights, hanging indents, wrapping inside boxes, floating "behind text" pictures anchored to their paragraph. |
+| `tests/test_page_fit.py` | 11 | Keeping Word pages identical to Scribd pages: repeating footers detected (one-off text near the bottom is not) and written to the real Word footer, table-of-contents dot leaders as dotted right tabs, line widths including spaces between runs, condensing (never stretching) wider substitute fonts, run properties in the order Word requires, side-by-side images and rules floating, rules anchored under their text, Private Use Area bullets. |
 | `tests/test_e2e.py` | 1 | Bulk download of real documents from a links file with `--format all`: a `de.scribd.com` link (8 pages) and a no-`www`, no-scheme link (2 pages, columns and bullets). Checks PDF page count, one TXT page marker per PDF page, and real text in TXT and DOCX. |
 
 ### Latest results
@@ -337,10 +355,11 @@ Run on Windows 11, Python 3.14, Chrome 156, Selenium 4.51:
 
 | Check | Result |
 |-------|--------|
-| Unit tests | **99 passed** in 0.6 s |
-| End-to-end test | **1 passed** in 12 s (2 documents, PDF + TXT + DOCX) |
+| Unit tests | **119 passed** in 0.8 s |
+| End-to-end test | **1 passed** in 13 s (2 documents, PDF + TXT + DOCX) |
+| DOCX page count in Microsoft Word | **Same as Scribd**: 2 → 2, 8 → 8, 307 → 307 |
 | PDF regression vs. previous version | **Identical**: same page count, page sizes and text on every page (8-page and 2-page documents) |
-| Large document, `--format all` | **307 pages in 3 min 41 s**: 307-page PDF (24 MB), TXT with 307 page markers (43,000 words), DOCX with 1,040 images (3.7 MB), no failed images |
+| Large document, `--format all` | **307 pages in 2 min 40 s**: 307-page PDF (24 MB), TXT with 307 page markers (43,000 words), DOCX (4 MB) that opens in Word as exactly 307 pages, no failed images |
 | Missing document | Exit code `1`, reason "The document was not found", debug screenshot and HTML saved |
 
 ---

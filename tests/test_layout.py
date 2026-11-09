@@ -189,8 +189,8 @@ def test_styles_are_kept_per_segment(sd):
     )
     first, second = line["segments"]
     assert first["text"] == "Name:"
-    assert first["style"] == ("Times New Roman", 16.0, "FF0000", True, False)
-    assert second["style"] == ("Arial", 16.0, "000000", False, False)
+    assert first["style"] == ("Times New Roman", 16.0, "FF0000", True, False, 0.0)
+    assert second["style"] == ("Arial", 16.0, "000000", False, False, 0.0)
 
 
 def test_layout_page_orders_text_and_images_top_to_bottom(sd):

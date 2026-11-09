@@ -1213,6 +1213,18 @@ def extract_page_content(driver, page_numbers):
             return real || names[0] || '';
         }
 
+        const measureContext = document.createElement('canvas').getContext('2d');
+
+        // Scribd stacks text and image layers (e.g. text z=2, images z=3,
+        // text z=4). Text in a lower layer can be hidden under an image.
+        function layerZ(element) {
+            const layer = element.closest('.text_layer, .image_layer');
+            if (!layer) {
+                return 0;
+            }
+            return parseInt(getComputedStyle(layer).zIndex, 10) || 0;
+        }
+
         return pageNumbers.map((pageNum) => {
             const outer = document.getElementById(`outer_page_${pageNum}`);
             if (!outer) {
@@ -1250,8 +1262,35 @@ def extract_page_content(driver, page_numbers):
                     const weight = parseInt(style.fontWeight, 10) || 400;
                     const family = fontName(style.fontFamily);
 
+                    // Width of the visible glyphs (trailing spaces carry
+                    // Scribd's huge word-spacing, so leave them out) and the
+                    // width the same text takes in the substitute font Word
+                    // will use. Their ratio lets the DOCX keep line widths.
+                    let visibleWidth = 0;
+                    let fallbackWidth = 0;
+                    let visibleLeft = 0;
+                    measureContext.font = `${style.fontStyle} ${weight} ${size}px "${family}"`;
+                    const spaceWidth = measureContext.measureText(' ').width;
+                    const trimmed = text.replace(/\\s+$/, '');
+                    const lead = trimmed.length - trimmed.replace(/^\\s+/, '').length;
+                    if (trimmed.length > lead) {
+                        const visibleRange = document.createRange();
+                        visibleRange.setStart(node, lead);
+                        visibleRange.setEnd(node, trimmed.length);
+                        const visibleRect = visibleRange.getBoundingClientRect();
+                        visibleWidth = visibleRect.width;
+                        visibleLeft = visibleRect.left - base.left;
+                        fallbackWidth = measureContext.measureText(
+                            trimmed.slice(lead).replace(/\\u00a0/g, ' ')
+                        ).width;
+                    }
+
                     runs.push({
                         text,
+                        vx: visibleLeft,
+                        vw: visibleWidth,
+                        fw: fallbackWidth,
+                        sw: spaceWidth,
                         x: rect.left - base.left,
                         y: rect.top - base.top,
                         w: rect.width,
@@ -1259,7 +1298,9 @@ def extract_page_content(driver, page_numbers):
                         color: style.color,
                         font: family,
                         bold: weight >= 600 || /bold|black|heavy/i.test(family),
-                        italic: style.fontStyle !== 'normal' || /italic|oblique/i.test(family)
+                        italic: style.fontStyle !== 'normal' || /italic|oblique/i.test(family),
+                        spacing: (parseFloat(style.letterSpacing) || 0) * cumulativeScale(parent, outer),
+                        z: layerZ(parent)
                     });
                 }
             }
@@ -1304,6 +1345,7 @@ def extract_page_content(driver, page_numbers):
                         y: top - base.top,
                         w: right - left,
                         h: bottom - top,
+                        z: layerZ(image),
                         crop: rect.width && rect.height ? {
                             left: (left - rect.left) / rect.width,
                             top: (top - rect.top) / rect.height,
@@ -1358,12 +1400,21 @@ def starts_with_list_marker(text):
 
 
 def _run_style(run):
+    """(font, size px, colour hex, bold, italic, letter spacing px)."""
+    size = float(run.get("size") or 0)
+    spacing = float(run.get("spacing") or 0)
+    # Scribd adds tiny letter-spacing tweaks for kerning, and spacing on
+    # one-glyph spans when it positions characters one by one. Only keep
+    # real letter-spaced text (e.g. spaced-out headings).
+    if abs(spacing) < 0.04 * size or len((run.get("text") or "").strip()) < 4:
+        spacing = 0.0
     return (
         run.get("font") or "",
-        round(float(run.get("size") or 0), 1),
+        round(size, 1),
         css_color_to_hex(run.get("color")),
         bool(run.get("bold")),
         bool(run.get("italic")),
+        round(spacing, 1),
     )
 
 
@@ -1379,6 +1430,11 @@ def build_lines(runs):
         text = (run.get("text") or "").replace(" ", " ")
         if not text:
             continue
+        stripped = text.strip()
+        if len(stripped) == 1 and "" <= stripped <= "":
+            # Embedded symbol fonts map bullets (and other dingbats) to the
+            # Unicode Private Use Area, which no normal font can show.
+            text = text.replace(stripped, "•")
         size = float(run.get("size") or 0) or 1.0
         cleaned.append({**run, "text": text, "size": size})
 
@@ -1455,6 +1511,7 @@ def build_lines(runs):
             continue
 
         visible = [run for run in line_runs if run["text"].strip()] or line_runs
+        width_original, width_word = line_widths(visible, segments, bool(tab_stops))
         lines.append(
             {
                 "x": min(run["x"] for run in visible),
@@ -1464,10 +1521,37 @@ def build_lines(runs):
                 "tabular": bool(tab_stops),
                 "tab_stops": tab_stops,
                 "segments": segments,
+                "width_original": width_original,
+                "width_word": width_word,
             }
         )
 
     return lines
+
+
+def line_widths(visible_runs, segments, tabular):
+    """
+    (original width, width in Word's substitute font) of one line, in px.
+
+    The original width is measured from the first to the last glyph in the
+    browser. The Word width adds the substitute font's glyph widths and the
+    width of every space between runs. Returns (0, 0) when unknown.
+    """
+    if tabular or not visible_runs:
+        return 0.0, 0.0
+    if not all(float(run.get("vw") or 0) > 0 and float(run.get("fw") or 0) > 0 for run in visible_runs):
+        return 0.0, 0.0
+
+    left = min(float(run.get("vx") or run["x"]) for run in visible_runs)
+    right = max(float(run.get("vx") or run["x"]) + float(run["vw"]) for run in visible_runs)
+    glyphs = sum(float(run["fw"]) for run in visible_runs)
+    inner_spaces = sum(
+        run["text"].replace(" ", " ").strip().count(" ") for run in visible_runs
+    )
+    line_text = "".join(segment["text"] for segment in segments)
+    boundary_spaces = max(0, line_text.count(" ") - inner_spaces)
+    space_width = sum(float(run.get("sw") or 0) for run in visible_runs) / len(visible_runs)
+    return max(0.0, right - left), glyphs + boundary_spaces * space_width
 
 
 def estimated_width(run):
@@ -1582,11 +1666,25 @@ def build_paragraphs(lines, page_width=0):
         result.append(
             {
                 "x": paragraph_lines[0]["x"],
+                # Left edge of wrapped lines (for hanging / first-line indents).
+                "x_wrap": (
+                    min(line["x"] for line in paragraph_lines[1:])
+                    if len(paragraph_lines) > 1
+                    else paragraph_lines[0]["x"]
+                ),
                 "x_end": max(line["x_end"] for line in paragraph_lines),
                 "y": paragraph_lines[0]["y"],
                 "y_end": paragraph_lines[-1]["y"] + paragraph_lines[-1]["size"],
                 "size": max(line["size"] for line in paragraph_lines),
                 "line_count": len(paragraph_lines),
+                # Original text width / width in Word's substitute font; the
+                # DOCX condenses characters by this ratio to wrap like the original.
+                "width_ratio": (
+                    sum(line.get("width_original", 0) for line in paragraph_lines)
+                    / sum(line.get("width_word", 0) for line in paragraph_lines)
+                    if sum(line.get("width_word", 0) for line in paragraph_lines) > 0
+                    else None
+                ),
                 "centered": centered,
                 "tab_stops": tab_stops,
                 "segments": segments,
@@ -1633,21 +1731,162 @@ def attach_image_bullets(paragraphs, images):
 
         for paragraph in marked:
             first_style = paragraph["segments"][0]["style"]
-            bullet_style = (first_style[0], first_style[1], first_style[2], False, False)
+            bullet_style = (first_style[0], first_style[1], first_style[2], False, False, 0.0)
             paragraph["segments"].insert(0, {"text": "• ", "style": bullet_style})
+            if paragraph.get("line_count", 1) == 1:
+                paragraph["x_wrap"] = paragraph["x"]
             paragraph["x"] = image["x"]
             paragraph["list"] = True
 
     return remaining
 
 
+def is_opaque_image(src):
+    """JPEG images have no transparency, so they fully hide what is below."""
+    src = (src or "").lower()
+    if src.startswith("data:"):
+        return src.startswith("data:image/jpeg") or src.startswith("data:image/jpg")
+    return urlparse(src).path.endswith((".jpg", ".jpeg"))
+
+
+def remove_covered_runs(runs, images, page_width=0, page_height=0):
+    """
+    Drop text that the browser does not show because an image covers it.
+
+    Scribd stacks layers (text z=2, images z=3, text z=4, ...). Edited PDFs
+    often keep the old text in a lower layer under an opaque white patch,
+    with the new text in a higher layer, which would otherwise come out
+    twice ("City, State (or Remote) City, State"). Full-page scans are
+    left alone so their OCR text layer is kept.
+    """
+    page_area = float(page_width or 0) * float(page_height or 0)
+    covers = [
+        image
+        for image in images or []
+        if image.get("z") is not None
+        and (page_area <= 0 or image["w"] * image["h"] < 0.4 * page_area)
+    ]
+    runs = list(runs or [])
+    if not covers:
+        return runs
+
+    def overlapped_by_higher_text(run, size):
+        """Newer text drawn in a higher layer over the same spot."""
+        start, end = run["x"], run["x"] + estimated_width(run)
+        for other in runs:
+            if (
+                other is not run
+                and (other.get("z") or 0) > run["z"]
+                and (other.get("text") or "").strip()
+                and abs(other["y"] - run["y"]) <= 0.5 * size
+                and min(end, other["x"] + estimated_width(other)) - max(start, other["x"])
+                > 0.3 * (end - start)
+            ):
+                return True
+        return False
+
+    visible = []
+    for run in runs:
+        z = run.get("z")
+        if z is not None and run.get("text", "").strip():
+            size = float(run.get("size") or 0)
+            center_x = run["x"] + estimated_width(run) / 2
+            center_y = run["y"] + 0.4 * size
+            covering = [
+                image
+                for image in covers
+                if image["z"] > z
+                and image["x"] <= center_x <= image["x"] + image["w"]
+                and image["y"] <= center_y <= image["y"] + image["h"]
+            ]
+            # JPEGs are opaque, so covered text is invisible. PNG/GIF may be
+            # transparent, so only drop text that newer text replaces.
+            if any(is_opaque_image(image.get("src")) for image in covering) or (
+                covering and overlapped_by_higher_text(run, size)
+            ):
+                continue
+        visible.append(run)
+    return visible
+
+
+def convert_line_images_to_text(runs, images, page_width=0):
+    """
+    Turn thin line images that sit on a text line into "____" text.
+
+    Fill-in blanks ("coursework in ______.") are often drawn as a 1px
+    image between two words. Long rules with no text beside them (section
+    dividers) stay images.
+    """
+    runs = list(runs or [])
+    remaining = []
+    text_runs = [run for run in runs if (run.get("text") or "").strip()]
+
+    for image in images or []:
+        is_line = 0 < image["h"] <= 3 and image["w"] >= 3 * image["h"]
+        if not is_line or (page_width and image["w"] > 0.4 * page_width):
+            remaining.append(image)
+            continue
+
+        line_runs = [
+            run
+            for run in text_runs
+            if run["y"] <= image["y"] <= run["y"] + 1.4 * float(run.get("size") or 0)
+        ]
+        neighbours = [
+            run
+            for run in line_runs
+            if abs(run["x"] + estimated_width(run) - image["x"]) <= 3 * run["size"]
+            or abs(run["x"] - (image["x"] + image["w"])) <= 3 * run["size"]
+        ]
+        if not neighbours:
+            remaining.append(image)
+            continue
+
+        model = min(neighbours, key=lambda run: abs(run["x"] - image["x"]))
+        size = float(model.get("size") or 0) or 1.0
+        count = max(2, int(round(image["w"] / (0.5 * size))))
+        runs.append(
+            {
+                **model,
+                "text": "_" * count,
+                "x": image["x"],
+                "w": image["w"],
+                "bold": False,
+                "italic": False,
+            }
+        )
+
+    return runs, remaining
+
+
 def layout_page(page):
     """Turn one extracted page into ordered blocks (paragraphs and images)."""
     width = float(page.get("width") or 0)
-    paragraphs = build_paragraphs(build_lines(page.get("runs")), width)
-    images = attach_image_bullets(paragraphs, page.get("images") or [])
+    height = float(page.get("height") or 0)
+    images = page.get("images") or []
+    runs = remove_covered_runs(page.get("runs"), images, width, height)
+    runs, images = convert_line_images_to_text(runs, images, width)
+    paragraphs = build_paragraphs(build_lines(runs), width)
+    images = attach_image_bullets(paragraphs, images)
     blocks = [{"type": "paragraph", **paragraph} for paragraph in paragraphs]
-    blocks += [{"type": "image", **image} for image in images]
+    for image in images:
+        # Images that share vertical space with text - boxes and shading the
+        # text is drawn on, or icons and figures beside it - must float at
+        # their exact position instead of pushing the text down.
+        behind = any(
+            min(image["y"] + image["h"], paragraph["y_end"]) - max(image["y"], paragraph["y"]) > 1
+            for paragraph in paragraphs
+        )
+        # Images side by side (diagrams, galleries) cannot be stacked inline.
+        behind = behind or any(
+            other is not image
+            and min(image["y"] + image["h"], other["y"] + other["h"]) - max(image["y"], other["y"]) > 1
+            for other in images
+        )
+        # Thin rules and dividers: as inline pictures Word would give each a
+        # full text line of height, adding drift on every page.
+        behind = behind or image["h"] <= 6
+        blocks.append({"type": "image", **image, "behind": behind})
     blocks.sort(key=lambda block: (round(block["y"], 1), block["x"]))
     return blocks
 
@@ -1732,150 +1971,426 @@ def apply_picture_crop(picture, crop):
             src_rect.set(attribute, str(values[side]))
 
 
+PX_TO_EMU = 9525  # 1 CSS px = 1/96 inch = 9525 EMU
+PARAGRAPH_OFFSET_INCLUDES_SPACE = 1
+
+
+# Run properties that must come after w:spacing / w:w (OOXML CT_RPr order).
+_RPR_AFTER_SPACING = (
+    "w:kern", "w:position", "w:sz", "w:szCs", "w:highlight", "w:u", "w:effect",
+    "w:bdr", "w:shd", "w:fitText", "w:vertAlign", "w:rtl", "w:cs", "w:em",
+    "w:lang", "w:eastAsianLayout", "w:specVanish", "w:oMath",
+)
+
+
+def _set_run_property(run, tag, value, successors):
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    run_properties = run._r.get_or_add_rPr()
+    element = run_properties.find(qn(tag))
+    if element is None:
+        element = OxmlElement(tag)
+        run_properties.insert_element_before(element, *successors)
+    element.set(qn("w:val"), str(value))
+
+
+def set_character_spacing(run, spacing_px):
+    """Word character spacing (Font > Advanced > Spacing), in 1/20 pt."""
+    _set_run_property(
+        run, "w:spacing", int(round(spacing_px * 0.75 * 20)), ("w:w",) + _RPR_AFTER_SPACING
+    )
+
+
+def set_character_scale(run, percent):
+    """Word character scale (Font > Advanced > Scale), in percent."""
+    _set_run_property(run, "w:w", int(percent), _RPR_AFTER_SPACING)
+
+
+DOT_LEADER = re.compile(r"[ \t]*(?:\.[ ]?){4,}[ \t]*|[ \t]*…{2,}[ \t]*")
+
+
+def float_picture_behind_text(picture, x_px, y_px, z_order, vertical_from="page"):
+    """
+    Turn an inline python-docx picture into a floating picture placed behind
+    the text (Word "Behind Text" layout). x is measured from the page's left
+    edge; y from the top of the page, or from the anchor paragraph when
+    vertical_from="paragraph" so the picture moves with its text.
+    """
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    inline = picture._inline
+    extent = inline.extent
+    doc_pr = inline.docPr
+    anchor = parse_xml(
+        f'<wp:anchor {nsdecls("wp", "a", "pic", "r")} distT="0" distB="0" distL="0" '
+        f'distR="0" simplePos="0" relativeHeight="{z_order}" behindDoc="1" locked="0" '
+        'layoutInCell="1" allowOverlap="1">'
+        '<wp:simplePos x="0" y="0"/>'
+        '<wp:positionH relativeFrom="page">'
+        f"<wp:posOffset>{int(x_px * PX_TO_EMU)}</wp:posOffset></wp:positionH>"
+        f'<wp:positionV relativeFrom="{vertical_from}">'
+        f"<wp:posOffset>{int(y_px * PX_TO_EMU)}</wp:posOffset></wp:positionV>"
+        f'<wp:extent cx="{extent.cx}" cy="{extent.cy}"/>'
+        '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
+        "<wp:wrapNone/>"
+        f'<wp:docPr id="{doc_pr.id}" name="{doc_pr.name}"/>'
+        "<wp:cNvGraphicFramePr/>"
+        "</wp:anchor>"
+    )
+    anchor.append(inline.graphic)
+    inline.getparent().replace(inline, anchor)
+    return anchor
+
+
+def footer_key(block):
+    """Footer text with numbers ignored, so "Page 3" and "Page 4" match."""
+    return re.sub(r"\d+", "#", re.sub(r"\s+", " ", paragraph_text(block))).strip().lower()
+
+
+def find_repeating_footers(pages, page_blocks, zone=0.85):
+    """
+    Find page-footer lines: short text at the bottom of the page that repeats
+    on many pages (running titles, copyright lines, page numbers).
+
+    Returns:
+        A set of footer_key() values.
+    """
+    if len(pages) < 3:
+        return set()
+
+    counts = {}
+    for page, blocks in zip(pages, page_blocks):
+        height = float(page.get("height") or 0)
+        if height <= 0:
+            continue
+        seen = set()
+        for block in reversed([b for b in blocks if not b.get("behind")]):
+            if (
+                block["type"] != "paragraph"
+                or block["y"] < zone * height
+                or block.get("line_count", 1) > 2
+            ):
+                break
+            seen.add(footer_key(block))
+        for key in seen:
+            counts[key] = counts.get(key, 0) + 1
+
+    minimum = max(2, int(0.2 * len(pages)))
+    return {key for key, count in counts.items() if key and count >= minimum}
+
+
 def write_docx_file(pages, filename, image_fetcher=fetch_image_bytes):
     """
     Write extracted pages as an editable Word document.
 
-    Text keeps Scribd's fonts, sizes, colours, bold/italic and rough indents;
-    figures are embedded as pictures; each Scribd page starts a new Word page
-    with the same paper size.
+    Each Scribd page becomes one Word section with the same paper size and
+    margins taken from where the text sits on that page. Text keeps Scribd's
+    fonts, sizes, colours, bold/italic, letter spacing, indents and
+    tab-aligned columns; character widths are scaled to the original so lines
+    wrap in the same places; vertical gaps and line heights are copied from
+    the original so pages do not overflow. Page footers go into the real Word
+    footer. Figures become pictures; images that share space with text
+    (boxes, shading, icons) float at their exact position.
     """
     from docx import Document
     from docx.enum.section import WD_SECTION
-    from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
-    from docx.shared import Inches, Pt, RGBColor
+    from docx.enum.text import (
+        WD_ALIGN_PARAGRAPH,
+        WD_LINE_SPACING,
+        WD_TAB_ALIGNMENT,
+        WD_TAB_LEADER,
+    )
+    from docx.shared import Pt, RGBColor
 
-    margin_inches = 0.5
+    min_margin_px = 0.15 * 96
     document = Document()
     image_cache = {}
-    failed_images = 0
+    failed = {"images": 0}
+    z_order = 0
 
-    def set_page_size(section, width_px, height_px):
-        section.page_width = Inches(max(1.0, width_px / 96))
-        section.page_height = Inches(max(1.0, height_px / 96))
-        for side in ("left_margin", "right_margin", "top_margin", "bottom_margin"):
-            setattr(section, side, Inches(margin_inches))
+    def load_image(src):
+        if src not in image_cache:
+            try:
+                image_cache[src] = image_fetcher(src)
+            except Exception:  # network errors, bad URLs, ...
+                image_cache[src] = None
+        return image_cache[src]
 
-    current_size = None
+    def clamp(value, low, high):
+        return max(low, min(high, value))
+
+    def px(value):
+        return Pt(value * 0.75)
+
+    def new_paragraph(container, reuse):
+        """Use the empty paragraph a new header/footer starts with, once."""
+        if reuse and container.paragraphs and not container.paragraphs[0].text:
+            paragraph = container.paragraphs[0]
+            if not paragraph.runs:
+                return paragraph
+        return container.add_paragraph()
+
+    def add_image_paragraph(container, block, gap, area, reuse=False):
+        """Inline picture in its own paragraph. Returns its height or None."""
+        data = load_image(block["src"])
+        if not data:
+            failed["images"] += 1
+            return None
+        scale = min(1.0, area["content_width"] / block["w"])
+        width, height = block["w"] * scale, block["h"] * scale
+        paragraph = new_paragraph(container, reuse)
+        paragraph_format = paragraph.paragraph_format
+        paragraph_format.space_before = px(min(gap, area["page_height"]))
+        paragraph_format.space_after = Pt(0)
+        paragraph_format.line_spacing = 1.0
+        indent = clamp(block["x"] - area["left"], 0.0, area["content_width"] * 0.8)
+        if indent + width <= area["content_width"]:
+            paragraph_format.left_indent = px(indent)
+        try:
+            picture = paragraph.add_run().add_picture(
+                BytesIO(data), width=px(width), height=px(height)
+            )
+            apply_picture_crop(picture, block.get("crop"))
+        except Exception:  # unsupported image format
+            failed["images"] += 1
+            paragraph._element.getparent().remove(paragraph._element)
+            return None
+        return height
+
+    def add_text_paragraph(container, block, gap, area, reuse=False):
+        """One text paragraph. Returns (paragraph, height in px)."""
+        size = block["size"]
+        line_count = block.get("line_count", 1)
+        line_height = size * 1.2
+        if line_count > 1:
+            pitch = (block["y_end"] - size - block["y"]) / (line_count - 1)
+            if size <= pitch <= 3 * size:
+                line_height = pitch
+        line_height = max(line_height, size * 1.05)
+
+        paragraph = new_paragraph(container, reuse)
+        paragraph_format = paragraph.paragraph_format
+        paragraph_format.space_before = px(min(gap, area["page_height"]))
+        paragraph_format.space_after = Pt(0)
+        paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+        paragraph_format.line_spacing = px(line_height)
+
+        left, content_width, right_edge = area["left"], area["content_width"], area["right_edge"]
+        indent = clamp(block["x"] - left, 0.0, content_width * 0.8)
+        if block["centered"]:
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        else:
+            wrap_indent = clamp(block.get("x_wrap", block["x"]) - left, 0.0, content_width * 0.8)
+            if wrap_indent > 0.5:
+                paragraph_format.left_indent = px(wrap_indent)
+            if abs(indent - wrap_indent) > 0.5:
+                # Negative = hanging indent (bullets), positive = first-line indent.
+                paragraph_format.first_line_indent = px(indent - wrap_indent)
+            if line_count > 1:
+                # Wrap where the original wrapped (e.g. text inside a box),
+                # with the same slack as the page's right margin.
+                right_indent = left + content_width - (block["x_end"] + area["slack"])
+                if right_indent > size:
+                    paragraph_format.right_indent = px(right_indent)
+
+        tab_stops = block.get("tab_stops") or []
+        for index, tab_x in enumerate(tab_stops):
+            if index == len(tab_stops) - 1 and block["x_end"] >= right_edge - 2 * size:
+                # Right-aligned column, e.g. dates or "City, State".
+                position = min(right_edge - left, content_width)
+                paragraph_format.tab_stops.add_tab_stop(px(position), WD_TAB_ALIGNMENT.RIGHT)
+            else:
+                position = clamp(tab_x - left, 0.0, content_width)
+                paragraph_format.tab_stops.add_tab_stop(px(position))
+
+        # Table-of-contents lines: "Title ........ 23" -> a tab with a dot
+        # leader, like a real Word TOC, so the dots never wrap.
+        segments = [dict(segment) for segment in block["segments"]]
+        full_text = "".join(segment["text"] for segment in segments)
+        leader = DOT_LEADER.search(full_text)
+        # Condense characters (never stretch) when Word's substitute font is
+        # wider than Scribd's embedded font, so lines wrap where they did.
+        width_ratio = block.get("width_ratio")
+        character_scale = None
+        if width_ratio and not tab_stops and not leader:
+            scale = 100.0 * width_ratio
+            if scale <= 97.0:
+                character_scale = round(clamp(scale, 50.0, 100.0))
+        if leader and full_text[leader.end():].strip() and full_text[: leader.start()].strip():
+            for segment in segments:
+                if DOT_LEADER.search(segment["text"]):
+                    segment["text"] = DOT_LEADER.sub("\t", segment["text"], count=1)
+                    segment["text"] = re.sub(r"\t\s*\t", "\t", segment["text"])
+                    break
+            position = min(right_edge - left, content_width)
+            paragraph_format.tab_stops.add_tab_stop(
+                px(position), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS
+            )
+
+        for segment in segments:
+            font_name, font_size, color, bold, italic, spacing = segment["style"]
+            is_bullet = segment["text"].strip() in BULLET_GLYPHS
+            if is_bullet:
+                # Scribd often draws bullets in a tiny symbol font.
+                font_size = max(font_size, size * 0.8)
+            run = paragraph.add_run(segment["text"])
+            if font_name:
+                run.font.name = font_name
+            if font_size:
+                run.font.size = Pt(max(1.0, min(400.0, font_size * 0.75)))
+            if color:
+                run.font.color.rgb = RGBColor.from_string(color)
+            run.font.bold = bold or None
+            run.font.italic = italic or None
+            if spacing:
+                set_character_spacing(run, spacing)
+            if character_scale and not is_bullet and not spacing:
+                set_character_scale(run, character_scale)
+
+        return paragraph, line_count * line_height
+
+    def write_blocks(container, blocks, top, area, reuse=False):
+        """
+        Write flowing blocks top to bottom.
+
+        Returns a list of (paragraph, block y, space before) for anchoring
+        floating images to the text next to them.
+        """
+        cursor = top  # where Word's next line starts, in page px
+        written = []
+        for block in blocks:
+            gap = max(0.0, block["y"] - cursor)
+            reuse_first = reuse and not written
+            if block["type"] == "image":
+                height = add_image_paragraph(container, block, gap, area, reuse_first)
+                if height is None:
+                    continue
+                paragraph = container.paragraphs[0] if reuse_first else container.paragraphs[-1]
+            else:
+                paragraph, height = add_text_paragraph(container, block, gap, area, reuse_first)
+            written.append((paragraph, block["y"], gap, block))
+            cursor = max(cursor, block["y"]) + height
+        return written
+
+    page_blocks = [layout_page(page) for page in pages]
+    footer_texts = find_repeating_footers(pages, page_blocks)
+
     for page_index, page in enumerate(pages):
         width_px = float(page.get("width") or 0) or DEFAULT_PAPER_WIDTH_INCHES * 96
         height_px = float(page.get("height") or 0) or DEFAULT_PAPER_HEIGHT_INCHES * 96
-        size = (round(width_px), round(height_px))
+        blocks = page_blocks[page_index]
+        flow = [block for block in blocks if not block.get("behind")]
 
-        if page_index == 0:
-            set_page_size(document.sections[0], width_px, height_px)
-        elif size != current_size:
-            set_page_size(document.add_section(WD_SECTION.NEW_PAGE), width_px, height_px)
-        else:
-            document.add_page_break()
-        current_size = size
+        # Page footers (running titles, copyright lines, page numbers that
+        # repeat at the bottom of many pages) go into the real Word footer,
+        # so they can never be pushed onto an extra page.
+        footer_blocks = []
+        for block in reversed(flow):
+            if block["type"] == "paragraph" and footer_key(block) in footer_texts:
+                footer_blocks.insert(0, block)
+            else:
+                break
+        body = flow[: len(flow) - len(footer_blocks)]
 
-        content_width_px = max(96.0, width_px - 2 * margin_inches * 96)
-        blocks = layout_page(page)
-        left_edge = min((block["x"] for block in blocks), default=0)
+        left_edge = min((block["x"] for block in flow), default=48.0)
         right_edge = max(
             (
                 block["x_end"] if block["type"] == "paragraph" else block["x"] + block["w"]
-                for block in blocks
+                for block in flow
             ),
-            default=width_px,
+            default=width_px - 48.0,
         )
-        previous_bottom = None
+        top_edge = min((block["y"] for block in body), default=48.0)
 
-        for block in blocks:
-            indent_px = max(0.0, block["x"] - left_edge)
-            # Vertical gap to the previous block, as Word "space before".
-            gap_px = 0.0 if previous_bottom is None else block["y"] - previous_bottom
+        # Margins follow the original text area. The right margin gets a
+        # little slack because substitute fonts are rarely an exact match.
+        slack = 0.02 * width_px
+        left_margin = clamp(left_edge, min_margin_px, width_px * 0.4)
+        right_margin = clamp(width_px - right_edge - slack, min_margin_px, width_px * 0.4)
+        top_margin = clamp(top_edge, min_margin_px, height_px * 0.4)
+        bottom_margin = min_margin_px
+        if footer_blocks:
+            bottom_margin = clamp(height_px - footer_blocks[0]["y"], min_margin_px, height_px * 0.4)
+        content_width = max(96.0, width_px - left_margin - right_margin)
+        area = {
+            "left": left_margin,
+            "content_width": content_width,
+            "right_edge": right_edge,
+            "page_height": height_px,
+            "slack": slack,
+        }
 
-            if block["type"] == "image":
-                src = block["src"]
-                if src not in image_cache:
-                    try:
-                        image_cache[src] = image_fetcher(src)
-                    except Exception:  # network errors, bad URLs, ...
-                        image_cache[src] = None
-                data = image_cache[src]
-                if not data:
-                    failed_images += 1
-                    continue
+        section = (
+            document.sections[0]
+            if page_index == 0
+            else document.add_section(WD_SECTION.NEW_PAGE)
+        )
+        section.page_width = px(width_px)
+        section.page_height = px(height_px)
+        section.left_margin = px(left_margin)
+        section.right_margin = px(right_margin)
+        section.top_margin = px(top_margin)
+        section.bottom_margin = px(bottom_margin)
+        section.header_distance = px(min_margin_px)
 
-                scale = min(1.0, content_width_px / block["w"])
-                image_width = block["w"] * scale
-                image_height = block["h"] * scale
-                paragraph = document.add_paragraph()
-                paragraph.paragraph_format.space_before = Pt(min(72.0, max(0.0, gap_px * 0.75)))
-                paragraph.paragraph_format.space_after = Pt(0)
-                if indent_px + image_width <= content_width_px:
-                    paragraph.paragraph_format.left_indent = Pt(indent_px * 0.75)
-                try:
-                    picture = paragraph.add_run().add_picture(
-                        BytesIO(data),
-                        width=Pt(image_width * 0.75),
-                        height=Pt(image_height * 0.75),
-                    )
-                    apply_picture_crop(picture, block.get("crop"))
-                except Exception:  # unsupported image format
-                    failed_images += 1
-                    paragraph._element.getparent().remove(paragraph._element)
-                    continue
-                previous_bottom = block["y"] + block["h"]
-                continue
-
-            size = block["size"]
-            paragraph = document.add_paragraph()
-            paragraph_format = paragraph.paragraph_format
-            paragraph_format.space_before = Pt(
-                min(72.0, max(0.0, (gap_px - 0.2 * size) * 0.75))
+        footer = section.footer
+        footer.is_linked_to_previous = False
+        if footer_blocks:
+            footer_top = footer_blocks[0]["y"]
+            footer_bottom = max(
+                block.get("y_end", block["y"] + block.get("h", 0)) for block in footer_blocks
             )
-            paragraph_format.space_after = Pt(0)
-            paragraph_format.line_spacing = 1.0
-            if block.get("line_count", 1) > 1:
-                pitch = (block["y_end"] - size - block["y"]) / (block["line_count"] - 1)
-                if size <= pitch <= 3 * size:
-                    paragraph_format.line_spacing = Pt(pitch * 0.75)
-            previous_bottom = block["y_end"]
+            section.footer_distance = px(clamp(height_px - footer_bottom - 4, 0.0, bottom_margin))
+            write_blocks(footer, footer_blocks, footer_top, area, reuse=True)
+        else:
+            section.footer_distance = px(min_margin_px / 2)
 
-            if block["centered"]:
-                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            elif indent_px > size:
-                paragraph_format.left_indent = Pt(
-                    min(indent_px, content_width_px * 0.8) * 0.75
+        written = write_blocks(document, body, top_margin, area)
+        if not written:
+            written = [(document.add_paragraph(), top_margin, 0.0, None)]
+
+        # Background and side images (boxes, rules, icons, diagrams) float at
+        # their original spot. Each is anchored to the paragraph just above
+        # it and positioned relative to that paragraph, so if Word sets the
+        # text a little higher or lower, the picture moves with its text.
+        for block in blocks:
+            if not block.get("behind"):
+                continue
+            data = load_image(block["src"])
+            if not data:
+                failed["images"] += 1
+                continue
+            above = [entry for entry in written if entry[1] <= block["y"] + 2]
+            paragraph, paragraph_y, space_before, anchor = above[-1] if above else written[0]
+            # Word measures paragraph-relative offsets from the top of the
+            # paragraph including its space before.
+            offset = block["y"] - paragraph_y + space_before * PARAGRAPH_OFFSET_INCLUDES_SPACE
+            if anchor is not None and anchor["type"] == "paragraph" and block["h"] <= 6:
+                # A rule just under a line of text: substitute fonts are often
+                # a little taller, so keep the rule clear of the descenders.
+                below_text = block["y"] - anchor["y_end"]
+                if 0 <= below_text <= 0.6 * anchor["size"]:
+                    offset += 0.15 * anchor["size"]
+            try:
+                picture = paragraph.add_run().add_picture(
+                    BytesIO(data), width=px(block["w"]), height=px(block["h"])
                 )
-
-            tab_stops = block.get("tab_stops") or []
-            for index, tab_x in enumerate(tab_stops):
-                is_last = index == len(tab_stops) - 1
-                if is_last and block["x_end"] >= right_edge - 2 * size:
-                    # Right-aligned column, e.g. dates or "City, State".
-                    position = min(right_edge - left_edge, content_width_px)
-                    paragraph_format.tab_stops.add_tab_stop(
-                        Pt(position * 0.75), WD_TAB_ALIGNMENT.RIGHT
-                    )
-                else:
-                    position = min(max(0.0, tab_x - left_edge), content_width_px)
-                    paragraph_format.tab_stops.add_tab_stop(Pt(position * 0.75))
-
-            for segment in block["segments"]:
-                font_name, font_size, color, bold, italic = segment["style"]
-                if segment["text"].strip() in BULLET_GLYPHS:
-                    # Scribd often draws bullets in a tiny symbol font.
-                    font_size = max(font_size, size * 0.8)
-                run = paragraph.add_run(segment["text"])
-                if font_name:
-                    run.font.name = font_name
-                if font_size:
-                    run.font.size = Pt(max(1.0, min(400.0, font_size * 0.75)))
-                if color:
-                    run.font.color.rgb = RGBColor.from_string(color)
-                run.font.bold = bold or None
-                run.font.italic = italic or None
+                apply_picture_crop(picture, block.get("crop"))
+                z_order += 1
+                float_picture_behind_text(
+                    picture, block["x"], offset, z_order, vertical_from="paragraph"
+                )
+            except Exception:  # unsupported image format
+                failed["images"] += 1
 
     temp_name = f"{filename}.part"
     document.save(temp_name)
     os.replace(temp_name, filename)
 
-    if failed_images:
-        print(f"  Warning: {failed_images} image(s) could not be added to the DOCX.")
+    if failed["images"]:
+        print(f"  Warning: {failed['images']} image(s) could not be added to the DOCX.")
 
     return os.path.abspath(filename)
 
