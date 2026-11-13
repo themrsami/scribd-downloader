@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Scribd Downloader",
+  "version": "1.0.0",
+  "description": "Save Scribd documents as PDF, text or an editable Word file. One click, bulk downloads, no login.",
+  "minimum_chrome_version": "120",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "Scribd Downloader",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": ["debugger", "downloads", "storage", "offscreen"],
+  "host_permissions": ["*://*.scribd.com/*", "*://*.scribdassets.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["*://*.scribd.com/document/*", "*://*.scribd.com/doc/*"],
+      "js": ["content/button.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

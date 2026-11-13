@@ -34,6 +34,10 @@
 
 ---
 
+> **Prefer a browser extension?** The same downloader is available as a Chrome extension with one-click and bulk downloads. See [`extension/`](extension/README.md).
+
+---
+
 ## Features
 
 - **One-click download** - Just paste the Scribd URL and get your PDF

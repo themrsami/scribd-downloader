@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scribd Downloader</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="top">
+      <img src="../icons/icon-48.png" alt="" width="28" height="28" />
+      <h1>Scribd Downloader</h1>
+    </header>
+
+    <main>
+      <!-- Shown when the current tab is a Scribd document. -->
+      <section class="card current" id="current" hidden>
+        <p class="eyebrow">This page</p>
+        <p class="doc-title" id="current-title"></p>
+      </section>
+
+      <section class="card" id="links-card">
+        <label class="eyebrow" for="links" id="links-label">Scribd links</label>
+        <textarea
+          id="links"
+          rows="3"
+          spellcheck="false"
+          placeholder="Paste one or more Scribd links, one per line"
+        ></textarea>
+      </section>
+
+      <button class="link-button" id="toggle-links" type="button" hidden>Download other links instead</button>
+
+      <fieldset class="formats">
+        <legend class="eyebrow">Save as</legend>
+        <label class="chip">
+          <input type="checkbox" name="format" value="pdf" />
+          <span><b>PDF</b><small>Exact copy</small></span>
+        </label>
+        <label class="chip">
+          <input type="checkbox" name="format" value="docx" />
+          <span><b>Word</b><small>Editable</small></span>
+        </label>
+        <label class="chip">
+          <input type="checkbox" name="format" value="txt" />
+          <span><b>Text</b><small>Plain text</small></span>
+        </label>
+      </fieldset>
+
+      <button class="primary" id="download" type="button">
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M10 3v9m0 0-3.5-3.5M10 12l3.5-3.5M4 15.5h12" />
+        </svg>
+        <span id="download-label">Download</span>
+      </button>
+      <p class="feedback" id="feedback" role="status" aria-live="polite"></p>
+
+      <section class="queue" id="queue" hidden>
+        <div class="queue-head">
+          <h2>Downloads</h2>
+          <button class="link-button" id="clear" type="button" hidden>Clear finished</button>
+        </div>
+        <ul id="jobs"></ul>
+      </section>
+    </main>
+
+    <footer>
+      While a download runs, Chrome shows a “started debugging this browser” bar. That is Chrome’s notice for the
+      built-in PDF printer this extension uses. It goes away when the download ends.
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
