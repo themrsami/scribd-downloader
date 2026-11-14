@@ -16,6 +16,29 @@ Everything the Python downloader does:
 - **Progress, cancel and retry** - page-by-page progress in the popup and on the toolbar icon.
 - **No login, no server** - everything runs in your own browser. Nothing is sent anywhere except to Scribd.
 
+## Screenshots
+
+| On a Scribd page | Bulk download in progress |
+|------------------|---------------------------|
+| ![Popup on a Scribd document page](screenshots/popup-this-page.png) | ![Bulk download with progress, an error and finished items](screenshots/popup-bulk-progress.png) |
+
+The Download button that appears on Scribd document pages, after a download:
+
+![In-page button showing "Saved to Downloads"](screenshots/page-button-saved.png)
+
+## Benchmarks
+
+Measured on one Windows 11 machine with Chrome 157. Times depend on your connection, CPU and the document.
+
+| Document | Pages | Formats | Extension | Python downloader |
+|----------|------:|---------|----------:|------------------:|
+| Resume template | 2 | PDF + Word + Text | 3 s | - |
+| Workday course manual | 307 | PDF + Word + Text | 80 s | 160-169 s |
+
+For the 307-page run the extension spent about 70 s loading and printing the pages and about 10 s building the Word file. Output sizes: PDF 22.5 MB, Word 12.1 MB, Text 0.3 MB.
+
+The extension is faster here mainly because it reuses the browser that is already open instead of starting a new one, and downloads the Word file's images several at a time.
+
 ## Install (developer mode)
 
 1. Download or clone this repository.
