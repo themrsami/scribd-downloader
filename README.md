@@ -34,7 +34,45 @@
 
 ---
 
-> **Prefer a browser extension?** The same downloader is available as a Chrome extension with one-click and bulk downloads. See [`extension/`](extension/README.md).
+## Two ways to use it
+
+Both do the same job and give the same files: PDF, Word (DOCX) and Text, single or bulk downloads, any Scribd link, no login.
+
+| | Chrome extension | Python program |
+|---|---|---|
+| **Best for** | Everyone. No setup beyond loading the extension | Scripts, servers and automation |
+| **How you use it** | Click **Download** on a Scribd page, or paste links in the popup | Run one command in a terminal |
+| **Needs** | Chrome 120+ | Python 3.10+ and Chrome |
+| **Guide** | [extension/README.md](extension/README.md) | [Installation](#installation) and [Usage](#usage) below |
+
+### Chrome extension
+
+<p align="center">
+  <img src="extension/screenshots/popup-this-page.png" alt="Extension popup on a Scribd document page, with PDF, Word and Text selected" width="360">
+  &nbsp;&nbsp;
+  <img src="extension/screenshots/popup-bulk-progress.png" alt="Extension popup during a bulk download, showing progress, a failed document and finished documents" width="360">
+</p>
+
+<p align="center">
+  <img src="extension/screenshots/page-button-saved.png" alt="Download button on a Scribd page showing Saved to Downloads" width="250">
+</p>
+
+<p align="center"><i>Left: on a Scribd document page. Right: a bulk download in progress. Below: the button added to Scribd pages.</i></p>
+
+To install it, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the [`extension`](extension) folder. Full guide: [extension/README.md](extension/README.md).
+
+### Python program
+
+<p align="center">
+  <img src="assets/python-terminal.png" alt="Terminal output of scribd-downloader.py saving a document as PDF and DOCX" width="820">
+</p>
+
+```bash
+pip install -r requirements.txt
+python scribd-downloader.py https://www.scribd.com/document/123456789/Document-Title --format pdf,docx
+```
+
+The rest of this page documents the Python program.
 
 ---
 
